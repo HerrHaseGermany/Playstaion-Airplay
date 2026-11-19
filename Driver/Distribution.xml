@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>Playstation Airplay Audio Output</title>
+    <options customize="never" require-scripts="false" hostArchitectures="arm64,x86_64"/>
+    <domains enable_localSystem="true" enable_currentUserHome="false" enable_anywhere="false"/>
+    <script><![CDATA[
+        function supported() {
+            var v = system.version.ProductVersion.split('.');
+            return Number(v[0]) > 14 || (Number(v[0]) == 14 && Number(v[1]) >= 2);
+        }
+    ]]></script>
+    <installation-check script="supported()"/>
+    <choices-outline><line choice="output"/></choices-outline>
+    <choice id="output" visible="false"><pkg-ref id="de.raudzis.playlink.audio.pkg"/></choice>
+    <pkg-ref id="de.raudzis.playlink.audio.pkg" version="0.1.0" onConclusion="RequireRestart">Component.pkg</pkg-ref>
+</installer-gui-script>
