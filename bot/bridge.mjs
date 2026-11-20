@@ -5,6 +5,8 @@ import {
 } from '@discordjs/voice';
 import { validateConfig } from './pcm.mjs';
 import { createLiveAudio } from './audio.mjs';
+import { watchUser } from './follow.mjs';
+import { leaveAndConfirm } from './shutdown.mjs';
 
 if (process.argv.includes('--doctor')) {
   console.log(generateDependencyReport());
@@ -16,18 +18,36 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBit
 let connection, player, source, silenceTimer, connectTimer;
 let ending = false;
 let secret = '';
+let revision = 0, unwatch;
 const clean = value => String(value).split(secret || '\0').join('[redacted]');
 
-function stop(code = 0) {
-  if (ending) return;
-  ending = true;
+function leaveVoice() {
   clearInterval(silenceTimer);
-  clearTimeout(connectTimer);
   player?.stop(true);
   source?.destroy();
-  connection?.destroy();
-  client.destroy();
-  process.exit(code);
+  const oldConnection = connection;
+  connection = player = source = undefined;
+  oldConnection?.destroy();
+}
+
+async function stop(code = 0) {
+  if (ending) return;
+  ending = true;
+  revision++;
+  unwatch?.();
+  clearTimeout(connectTimer);
+  const started = Date.now();
+  // Also bound gateway logout if the network or library never settles.
+  const deadline = setTimeout(() => process.exit(code), 5000);
+  try {
+    const confirmed = await leaveAndConfirm(client, connection, leaveVoice);
+    emit('stopped', { confirmed, elapsedMs: Date.now() - started });
+    await client.destroy();
+  } catch { code = code || 1; }
+  finally {
+    clearTimeout(deadline);
+    process.exit(code);
+  }
 }
 
 function fail(error) {
@@ -51,46 +71,72 @@ async function connect(input) {
   const ready = new Promise(resolve => client.once(Events.ClientReady, resolve));
   await client.login(config.token);
   await ready;
-  const channel = await client.channels.fetch(config.channelId);
+  if (ending) return;
+  let lastAudio = Date.now();
+  process.stdin.on('data', chunk => { lastAudio = Date.now(); source?.feed(chunk); });
+  process.stdin.resume();
+  if (config.followUser) {
+    clearTimeout(connectTimer);
+    unwatch = watchUser(client, config.userId, channelId => {
+      const id = ++revision;
+      leaveVoice();
+      emit('waiting', { message: channelId ? 'Following your voice channel…' : 'Waiting for you to join a shared server voice channel…' });
+      if (!channelId) return;
+      join(channelId, id, () => lastAudio).catch(error => {
+        if (ending || revision !== id) return;
+        leaveVoice();
+        emit('waiting', { message: `Cannot follow: ${clean(error.message)} Switch voice channels or restart to retry.` });
+      });
+    });
+  } else {
+    await join(config.channelId, ++revision, () => lastAudio);
+    clearTimeout(connectTimer);
+  }
+}
+
+async function join(channelId, id, lastAudio) {
+  const current = () => !ending && revision === id;
+  const channel = await client.channels.fetch(channelId);
+  if (!current()) return;
   if (!channel || channel.type !== ChannelType.GuildVoice) {
     throw new Error('Choose a regular server voice channel, not a DM or Stage channel.');
   }
   const me = await channel.guild.members.fetchMe();
+  if (!current()) return;
   const permissions = channel.permissionsFor(me);
   if (![PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect, PermissionFlagsBits.Speak]
     .every(flag => permissions?.has(flag))) {
     throw new Error('The bot needs View Channel, Connect, and Speak in this channel.');
   }
   emit('status', { message: `Joining ${channel.name}…` });
-  connection = joinVoiceChannel({
+  const voice = joinVoiceChannel({
     channelId: channel.id, guildId: channel.guild.id,
     adapterCreator: channel.guild.voiceAdapterCreator,
     selfDeaf: true, selfMute: false,
   });
-  connection.on('error', fail);
-  connection.on(VoiceConnectionStatus.Disconnected, async () => {
+  connection = voice;
+  voice.on('error', error => { if (current()) fail(error); });
+  voice.on(VoiceConnectionStatus.Disconnected, async () => {
+    if (!current()) return;
     emit('reconnecting', { message: 'Voice disconnected; reconnecting…' });
     try {
-      await entersState(connection, VoiceConnectionStatus.Ready, 15_000);
-      emit('reconnected', { message: 'Voice reconnected.' });
-    } catch { fail(new Error('Voice connection lost. Stop and reconnect.')); }
+      await entersState(voice, VoiceConnectionStatus.Ready, 15_000);
+      if (current()) emit('reconnected', { message: 'Voice reconnected.' });
+    } catch { if (current()) fail(new Error('Voice connection lost. Stop and reconnect.')); }
   });
-  await entersState(connection, VoiceConnectionStatus.Ready, 30_000);
+  await entersState(voice, VoiceConnectionStatus.Ready, 30_000);
+  if (!current()) return;
   const audio = createLiveAudio(Math.min(channel.bitrate, 128_000));
   source = audio.source;
   player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Play } });
-  player.on('error', fail);
-  connection.subscribe(player);
+  player.on('error', error => { if (current()) fail(error); });
+  voice.subscribe(player);
   player.play(audio.resource);
-  let lastAudio = Date.now();
-  process.stdin.on('data', chunk => { lastAudio = Date.now(); source.feed(chunk); });
   // Keep a valid live resource when macOS emits no samples during silence.
   silenceTimer = setInterval(() => {
-    if (Date.now() - lastAudio > 40) source.feed(Buffer.alloc(3840));
+    if (Date.now() - lastAudio() > 40) source?.feed(Buffer.alloc(3840));
   }, 20);
   emit('ready', { channel: channel.name, bot: client.user.username });
-  clearTimeout(connectTimer);
-  process.stdin.resume();
 }
 
 // One JSON configuration line, followed by raw PCM on the same private pipe.

@@ -7,13 +7,27 @@ import OSLog
 final class PlayLinkAppDelegate: NSObject, NSApplicationDelegate {
     private let model = PlayLinkModel()
     private var controller: MenuBarController?
+    private let outputLifetime = OutputLifetime()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         installAppMenu()
         controller = MenuBarController(model: model)
-        controller?.showWindow()
+        model.onPreviousOutput = { [weak self] uid in self?.outputLifetime.remember(uid) }
+        model.onOutputAvailable = { [weak self] in self?.outputLifetime.tuneBuffer() }
+        outputLifetime.onFailure = { [weak self] in
+            self?.model.stop()
+            self?.model.error = "The audio output monitor stopped. Restart Playstation Airplay."
+        }
+        do { try outputLifetime.start() }
+        catch { model.error = error.localizedDescription }
+        model.beginObservingOutput()
+        let loginLaunch = NSAppleEventManager.shared().currentAppleEvent?
+            .paramDescriptor(forKeyword: AEKeyword(keyAEPropData))?.enumCodeValue == OSType(keyAELaunchedAsLogInItem)
+        if !loginLaunch { controller?.showWindow() }
     }
+
+    func applicationDidBecomeActive(_ notification: Notification) { model.refreshLoginStatus() }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
@@ -22,7 +36,16 @@ final class PlayLinkAppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
-    func applicationWillTerminate(_ notification: Notification) { model.stop() }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        model.stop()
+        Task {
+            await model.finishStopping()
+            do { try outputLifetime.finish() }
+            catch { model.error = error.localizedDescription }
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
 
     private func installAppMenu() {
         let menuBar = NSMenu()
@@ -106,7 +129,7 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSWindowDelegate {
         add("Open Playstation Airplay…", action: #selector(showWindow), to: menu)
         let streaming = add(model.active ? "Stop streaming" : "Start streaming",
             action: #selector(toggleStream), to: menu)
-        streaming.isEnabled = model.active || model.outputInstalled
+        streaming.isEnabled = model.active || (model.outputAvailable && !model.editingConnection)
         menu.addItem(.separator())
         add("Quit Playstation Airplay", action: #selector(quit), key: "q", to: menu)
     }

@@ -16,7 +16,7 @@ cp scripts/Info.plist "$app/Contents/Info.plist"
 cp .build/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 cp 'dist/Playstation Airplay Audio Output.pkg' "$app/Contents/Resources/"
 cp "$(command -v node)" "$app/Contents/Resources/runtime/node"
-cp bot/bridge.mjs bot/pcm.mjs bot/audio.mjs "$app/Contents/Resources/backend/bot/"
+cp bot/bridge.mjs bot/pcm.mjs bot/audio.mjs bot/follow.mjs bot/shutdown.mjs "$app/Contents/Resources/backend/bot/"
 cp package.json package-lock.json "$app/Contents/Resources/backend/"
 rsync -a --delete node_modules/ "$app/Contents/Resources/backend/node_modules/"
 # Finder may attach metadata after a previous launch; strip it from build output.

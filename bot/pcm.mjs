@@ -36,6 +36,12 @@ export class LivePCM extends Readable {
 
 export function validateConfig(config) {
   if (typeof config.token !== 'string' || !config.token.trim()) throw new Error('Enter a bot token.');
+  if (config.followUser === true) {
+    if (typeof config.userId !== 'string' || !/^\d{17,20}$/.test(config.userId)) {
+      throw new Error('Enter a valid Discord user ID to follow.');
+    }
+    return { token: config.token.trim(), followUser: true, userId: config.userId };
+  }
   if (!/^\d{17,20}$/.test(config.channelId ?? '')) throw new Error('Enter a valid voice channel ID.');
   return { token: config.token.trim(), channelId: config.channelId };
 }
